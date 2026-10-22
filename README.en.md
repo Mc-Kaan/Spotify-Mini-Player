@@ -10,9 +10,10 @@ No Spotify API, Premium account or Client ID is required. The app connects to Wi
 
 - HUD-style rounded horizontal window: album cover on the left, title and artist next to it, a progress bar with elapsed / remaining time below
 - Animations: slide-in on launch, cover and text slide in when the song changes, animated equalizer bars while playing, smoothly moving progress bar
-- Previous, play/pause and next buttons fade in when you hover over the window
-- Drag it anywhere; it stays on top of other windows
-- Right-click menu: "always on top" toggle and close
+- Previous, play/pause and next buttons fade in on hover and follow your mouse; clicks trigger a ripple effect, and the content slides left/right when you skip tracks
+- Settings via the gear icon in the top right: preset themes (Black, Dark gray, Midnight blue, Purple, Burgundy, Light) and full color customization with HEX / RGB / a color picker
+- Theme, window position and "always on top" are remembered (`%APPDATA%\SpotifyMiniPlayer\config.json`)
+- Drag it anywhere; right-click for settings and close
 - Works with free Spotify accounts
 
 ## Usage

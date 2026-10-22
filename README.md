@@ -10,9 +10,10 @@ Spotify API'si, Premium hesap veya Client ID gerekmez. Uygulama, Windows'un sist
 
 - HUD tarzı, yuvarlak köşeli yatay pencere: solda albüm kapağı, yanında şarkı adı ve sanatçı, altta ilerleme çubuğu ile geçen / kalan süre
 - Animasyonlar: açılışta kayarak belirme, şarkı değişince kapak ve yazıların kayarak gelmesi, çalarken hareket eden ekolayzır çubukları, yumuşak ilerleyen çubuk
-- Fareyi üstüne getirince önceki, oynat/durdur ve sonraki butonları belirir
-- Sürükleyerek istediğin yere taşıyabilirsin, diğer pencerelerin üstünde kalır
-- Sağ tık menüsü: "Her zaman üstte" seçeneği ve kapat
+- Fareyi üstüne getirince önceki, oynat/durdur ve sonraki butonları belirir ve fareyi takip eder; tıklayınca dalga efekti çıkar, ileri/geri basınca içerik ilgili yöne kayar
+- Sağ üstteki çark simgesiyle ayarlar: hazır temalar (Siyah, Koyu gri, Gece mavisi, Mor, Bordo, Açık) ve HEX / RGB / renk seçici ile tüm renkleri değiştirme
+- Tema, pencere konumu ve "her zaman üstte" seçimi kapatıp açınca hatırlanır (`%APPDATA%\SpotifyMiniPlayer\config.json`)
+- Sürükleyerek istediğin yere taşıyabilirsin; sağ tık menüsünden ayarlar ve kapat
 - Ücretsiz Spotify hesabıyla da çalışır
 
 ## Kullanım
