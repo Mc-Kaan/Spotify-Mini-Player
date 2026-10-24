@@ -11,11 +11,14 @@ Spotify API'si, Premium hesap veya Client ID gerekmez. Uygulama, Windows'un sist
 - HUD tarzı, yuvarlak köşeli yatay pencere: solda albüm kapağı, yanında şarkı adı ve sanatçı, altta ilerleme çubuğu ile geçen / kalan süre
 - İlerleme çubuğuna tıklayıp basılı tutarak istediğin dakika ve saniyeye sürükleyebilirsin (sarma)
 - İlerleme çubuğunun altında senkronize şarkı sözleri: satır satır ilerler, çalan satır vurgulanır, kayarak animasyonlu geçer ([LRCLIB](https://lrclib.net) kaynaklı)
+- Kapaktan otomatik vurgu rengi: ilerleme çubuğu, ekolayzır ve dalga efekti her şarkıda albüm kapağının rengine yumuşakça geçer
+- Ses seviyesi: fareyi üstüne getirince üstte ses çubuğu belirir; sürükleyebilir ya da fare tekerleğini çevirebilirsin
+- Kompakt mod: boş bir yere çift tıklayınca sadece kapak, şarkı adı ve ince bir ilerleme çizgisi kalan küçük bir şeride dönüşür
 - Animasyonlar: açılışta kayarak belirme, şarkı değişince kapak ve yazıların kayarak gelmesi, çalarken hareket eden ekolayzır çubukları, yumuşak ilerleyen çubuk
 - Fareyi üstüne getirince önceki, oynat/durdur ve sonraki butonları belirir ve fareyi takip eder; tıklayınca dalga efekti çıkar, ileri/geri basınca içerik ilgili yöne kayar
-- Sağ üstteki çark simgesiyle ayarlar: hazır temalar, HEX / RGB / renk seçici ile tüm renkleri değiştirme, pencere boyutu (%60-%200), sözleri açma/kapatma
+- Sağ üstteki çark simgesiyle ayarlar: hazır temalar, HEX / RGB / renk seçici ile tüm renkleri değiştirme, pencere boyutu (%60-%200), şeffaflık, yazı tipi seçimi, sözleri ve kompakt modu açma/kapatma
 - Ctrl + fare tekerleği ile pencereyi hızlıca büyütüp küçültebilirsin
-- Tema, boyut, pencere konumu ve "her zaman üstte" seçimi kapatıp açınca hatırlanır (`%APPDATA%\SpotifyMiniPlayer\config.json`)
+- Tema, boyut, şeffaflık, yazı tipi, mod, pencere konumu ve "her zaman üstte" seçimi kapatıp açınca hatırlanır (`%APPDATA%\SpotifyMiniPlayer\config.json`)
 - Uygulama arayüzü İngilizcedir
 - Ücretsiz Spotify hesabıyla da çalışır
 
@@ -46,6 +49,7 @@ pyinstaller --onefile --noconsole --collect-submodules winsdk --name SpotifyMini
 
 ## Sınırlamalar
 
+- Ses çubuğu, Spotify'ın kendi ses seviyesini (Spotify çalmıyorsa sistem sesini) ayarlar ve `pycaw` paketini kullanır. Paket kurulu değilse ya da ses aygıtı bulunamazsa ses çubuğu görünmez, uygulamanın geri kalanı çalışmaya devam eder.
 - Şarkı sözleri Spotify'dan değil, açık bir servis olan LRCLIB'den gelir. Her şarkının senkronize sözü bulunmayabilir ve zamanlama Spotify'ın kendi sözlerinden farklı olabilir. Sözleri getirmek için internet gerekir.
 - Sarma özelliği, Spotify'ın Windows medya kontrolünde konum değiştirmeyi desteklemesine bağlıdır. Desteklemezse çubuk eski yerine döner.
 - Sadece Windows 10/11 üzerinde çalışır.

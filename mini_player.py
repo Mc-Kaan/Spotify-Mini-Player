@@ -7,18 +7,22 @@ Client ID is needed.
 
 Usage:
   - Drag the window by any empty area.
-  - Hover over it to reveal the previous / play-pause / next buttons.
+  - Hover over it to reveal the previous / play-pause / next buttons and the
+    volume slider.
   - Click or drag on the progress bar to seek.
-  - Gear icon (top right): themes, colors (HEX / RGB), size, lyrics.
-  - Ctrl + mouse wheel: resize the window.
+  - Mouse wheel over the window: volume. Ctrl + mouse wheel: resize.
+  - Double-click an empty area: switch between full and compact mode.
+  - Gear icon (top right): themes, colors, size, opacity, font, lyrics.
   - Right-click: menu.
 
 Synced lyrics are fetched from LRCLIB (https://lrclib.net), not from Spotify.
+Volume uses the optional "pycaw" package (Spotify's volume, or the system volume).
 Settings are stored in %APPDATA%\\SpotifyMiniPlayer\\config.json
 """
 
 import asyncio
 import bisect
+import colorsys
 import io
 import json
 import math
@@ -32,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from tkinter import ttk
 
 from PIL import Image, ImageTk
 from winsdk.windows.media.control import (
@@ -43,15 +48,19 @@ from winsdk.windows.storage.streams import Buffer, DataReader, InputStreamOption
 # ----------------------------------------------------------------------------
 # Constants (all layout values are in "logical" pixels at 100% size)
 # ----------------------------------------------------------------------------
-FONT_FAMILY = "Consolas"  # you can put an installed pixel font name here
+FONT_FAMILY = "Consolas"  # default font
 
-W0, H0 = 430, 110          # player part
+W0, H0 = 430, 110            # full mode: player part
 LYR_TOP0, LYR_H0 = 108, 102  # lyrics panel (below the player part)
-LYR_LH = 26                # lyric line spacing
+LYR_LH = 26                  # lyric line spacing
 LYR_SLOTS = 7
-LYRIC_LEAD_MS = 300        # show lines slightly early so they are readable
+LYRIC_LEAD_MS = 300          # show lines slightly early so they are readable
+
+CW0, CH0 = 260, 56           # compact mode
 
 SCALE_MIN, SCALE_MAX, SCALE_STEP = 0.6, 2.0, 0.05
+OPACITY_MIN, OPACITY_DEFAULT = 0.3, 0.95
+VOLUME_STEP = 0.05
 
 KEY = "#010203"  # color key used to make the window corners transparent
 GREEN = "#1DB954"
@@ -69,6 +78,14 @@ GEAR_POS = (W0 - 62, 24)
 LOGO_POS = (W0 - 28, 24)
 NUDGE = 22  # how far the content slides when you skip a track
 
+VOL_Y = 22                                   # volume slider row (top, revealed on hover)
+VOL_ICON_X, VOL_X1, VOL_X2 = 192, 206, 306
+
+# Compact mode layout
+C_COVER, C_COVER_X, C_COVER_Y = 40, 8, 8
+C_TX, C_TITLE_Y = 58, 24
+C_BAR_Y = 44
+
 # The three arcs of the Spotify logo: (left end, peak, right end, thickness) in a 24x24 box
 SPOTIFY_BARS = [
     ((4.8, 8.3), (12.2, 7.4), (19.6, 9.8), 2.5),
@@ -81,7 +98,7 @@ DEFAULT_THEME = {
     "border": "#2c2c2c",  # border
     "title": "#ffffff",   # song title, icons, current lyric
     "text2": "#b3b3b3",   # artist, times, other lyrics
-    "accent": "#1DB954",  # progress bar, equalizer, ripple
+    "accent": "#1db954",  # progress bar, equalizer, ripple
 }
 
 PRESETS = {
@@ -95,7 +112,7 @@ PRESETS = {
     "Burgundy": {"bg": "#2a1519", "border": "#46222a", "title": "#ffffff",
                  "text2": "#d0a9b0", "accent": "#ff4d6d"},
     "Light": {"bg": "#f2f2f2", "border": "#d0d0d0", "title": "#111111",
-              "text2": "#555555", "accent": "#1DB954"},
+              "text2": "#555555", "accent": "#1db954"},
 }
 
 THEME_LABELS = [
@@ -111,7 +128,7 @@ CONFIG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 LRCLIB = "https://lrclib.net/api"
-USER_AGENT = "SpotifyMiniPlayer/1.3 (https://github.com/Mc-Kaan/Spotify-Mini-Player)"
+USER_AGENT = "SpotifyMiniPlayer/1.4 (https://github.com/Mc-Kaan/Spotify-Mini-Player)"
 
 
 # ----------------------------------------------------------------------------
@@ -140,6 +157,11 @@ def mix(c1, c2, t):
     a, b = hex_rgb(c1), hex_rgb(c2)
     t = max(0.0, min(1.0, t))
     return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def luminance(c):
+    r, g, b = hex_rgb(c)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
 
 
 def clamp(v, lo=0.0, hi=1.0):
@@ -196,6 +218,36 @@ def lyr_alpha(d):
     if d < 2:
         return 0.45 * (2 - d)
     return 0.0
+
+
+def dominant_color(data, bg):
+    """Picks a vivid, readable accent color from the album cover (None for gray covers)."""
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB").resize((40, 40))
+        raw = img.tobytes()
+    except Exception:
+        return None
+    bins = {}
+    for i in range(0, len(raw) - 2, 3):
+        r, g, b = raw[i], raw[i + 1], raw[i + 2]
+        h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        if s < 0.25 or v < 0.2:
+            continue
+        w = s * v
+        e = bins.setdefault(int(h * 12) % 12, [0.0, 0.0, 0.0, 0.0])
+        e[0] += w
+        e[1] += r * w
+        e[2] += g * w
+        e[3] += b * w
+    if not bins:
+        return None
+    w, rs, gs, bs = bins[max(bins, key=lambda k: bins[k][0])]
+    h, s, v = colorsys.rgb_to_hsv(rs / w / 255, gs / w / 255, bs / w / 255)
+    s = max(s, 0.55)
+    # Keep it readable on the current background (bright on dark, deeper on light)
+    v = clamp(v, 0.75, 1.0) if luminance(bg) < 0.5 else clamp(v, 0.35, 0.65)
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
 def load_config():
@@ -350,6 +402,72 @@ class LyricsStore:
 
 
 # ----------------------------------------------------------------------------
+# Volume (optional, needs the "pycaw" package)
+# ----------------------------------------------------------------------------
+class VolumeController:
+    """Reads / sets the volume of Spotify's audio session (falls back to the master volume).
+
+    All Windows audio (COM) calls run in one background thread. If pycaw isn't
+    installed or there is no audio device, `available` stays False and the UI hides
+    the volume slider.
+    """
+
+    def __init__(self):
+        self.available = False
+        self.level = None          # 0.0 - 1.0, last known value
+        self._target = None
+        self._wake = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def set(self, level):
+        level = clamp(level)
+        self.level = level
+        self._target = level
+        self._wake.set()
+
+    def _interface(self, AudioUtilities):
+        """Returns (getter, setter) for Spotify's session volume, else for the master volume."""
+        try:
+            for s in AudioUtilities.GetAllSessions():
+                proc = getattr(s, "Process", None)
+                if proc is not None and proc.name().lower() == "spotify.exe":
+                    vol = s.SimpleAudioVolume
+                    return vol.GetMasterVolume, lambda v: vol.SetMasterVolume(v, None)
+        except Exception:
+            pass
+        spk = AudioUtilities.GetSpeakers()
+        if hasattr(spk, "EndpointVolume"):
+            ev = spk.EndpointVolume
+        else:  # older pycaw versions
+            from comtypes import CLSCTX_ALL, POINTER, cast
+            from pycaw.pycaw import IAudioEndpointVolume
+            ev = cast(spk.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None),
+                      POINTER(IAudioEndpointVolume))
+        return ev.GetMasterVolumeLevelScalar, lambda v: ev.SetMasterVolumeLevelScalar(v, None)
+
+    def _run(self):
+        try:
+            import comtypes
+            comtypes.CoInitialize()
+            from pycaw.pycaw import AudioUtilities
+        except Exception:
+            return
+        while True:
+            try:
+                getter, setter = self._interface(AudioUtilities)
+                if self._target is not None:
+                    target, self._target = self._target, None
+                    setter(target)
+                else:
+                    self.level = float(getter())
+                self.available = True
+            except Exception:
+                pass
+            self._wake.wait(1.5)
+            self._wake.clear()
+
+
+# ----------------------------------------------------------------------------
 # Windows media session (background thread)
 # ----------------------------------------------------------------------------
 class MediaBackend:
@@ -496,6 +614,7 @@ class SettingsWindow:
     FG = "#e8e8e8"
     FIELD = "#2b2b2b"
     BTN = "#333333"
+    HOVER = "#444444"
 
     def __init__(self, player):
         self.player = player
@@ -509,43 +628,93 @@ class SettingsWindow:
 
         self.key = tk.StringVar(value="bg")
         self.hex_var = tk.StringVar()
+        self.font_var = tk.StringVar(value=player.font_family)
 
+        # Tabs
+        tabbar = tk.Frame(win, bg=self.BG)
+        tabbar.pack(fill="x", padx=14, pady=(12, 0))
+        self.tab_btns = {}
+        for name in ("Theme", "Window"):
+            b = tk.Button(tabbar, text=name, command=lambda n=name: self.show_tab(n),
+                          relief="flat", bd=0, padx=16, pady=5, font=("Segoe UI", 10, "bold"))
+            b.pack(side="left", padx=(0, 6))
+            self.tab_btns[name] = b
+        body = tk.Frame(win, bg=self.BG)
+        body.pack(fill="x")
+        self.tab_theme = tk.Frame(body, bg=self.BG)
+        self.tab_window = tk.Frame(body, bg=self.BG)
+
+        self.build_theme_tab(self.tab_theme)
+        self.build_window_tab(self.tab_window)
+
+        # Bottom buttons
+        bf = tk.Frame(win, bg=self.BG)
+        bf.pack(fill="x", padx=14, pady=12)
+        tk.Button(bf, text="Reset all", command=self.reset_all,
+                  bg=self.BTN, fg=self.FG, activebackground=self.HOVER,
+                  activeforeground=self.FG, relief="flat", bd=0, padx=10, pady=4)\
+            .pack(side="left")
+        tk.Button(bf, text="Close", command=self.close, bg=GREEN, fg="#000000",
+                  activebackground="#1ed760", activeforeground="#000000",
+                  relief="flat", bd=0, padx=16, pady=4)\
+            .pack(side="right")
+
+        self.load_editor()
+        self.sync_window_controls()
+        self.show_tab("Theme")
+        self.place()
+
+    # -- Tabs ---------------------------------------------------------------------
+    def show_tab(self, name):
+        self.tab_theme.pack_forget()
+        self.tab_window.pack_forget()
+        (self.tab_theme if name == "Theme" else self.tab_window).pack(fill="x")
+        for n, b in self.tab_btns.items():
+            if n == name:
+                b.config(bg=GREEN, fg="#000000", activebackground="#1ed760", activeforeground="#000000")
+            else:
+                b.config(bg=self.BTN, fg=self.FG, activebackground=self.HOVER, activeforeground=self.FG)
+
+    def build_theme_tab(self, tab):
+        p = self.player
         head = ("Segoe UI", 10, "bold")
 
-        # Presets
-        tk.Label(win, text="Presets", bg=self.BG, fg=self.FG, font=head)\
+        tk.Label(tab, text="Presets", bg=self.BG, fg=self.FG, font=head)\
             .pack(anchor="w", padx=14, pady=(12, 4))
-        pf = tk.Frame(win, bg=self.BG)
+        pf = tk.Frame(tab, bg=self.BG)
         pf.pack(anchor="w", padx=11)
         for i, name in enumerate(PRESETS):
             tk.Button(pf, text=name, command=lambda n=name: self.apply_preset(n),
-                      bg=self.BTN, fg=self.FG, activebackground="#444444",
+                      bg=self.BTN, fg=self.FG, activebackground=self.HOVER,
                       activeforeground=self.FG, relief="flat", bd=0,
                       padx=10, pady=4, width=10)\
                 .grid(row=i // 3, column=i % 3, padx=3, pady=3, sticky="ew")
 
-        # Color targets
-        tk.Label(win, text="Colors", bg=self.BG, fg=self.FG, font=head)\
+        tk.Label(tab, text="Colors", bg=self.BG, fg=self.FG, font=head)\
             .pack(anchor="w", padx=14, pady=(12, 2))
         self.swatches = {}
         for k, label in THEME_LABELS:
-            row = tk.Frame(win, bg=self.BG)
+            row = tk.Frame(tab, bg=self.BG)
             row.pack(fill="x", padx=14, pady=1)
             tk.Radiobutton(row, text=label, variable=self.key, value=k,
                            command=self.load_editor, bg=self.BG, fg=self.FG,
                            selectcolor=self.FIELD, activebackground=self.BG,
                            activeforeground=self.FG, anchor="w", width=30)\
                 .pack(side="left")
-            sw = tk.Label(row, width=4, bg=player.theme[k], relief="solid", bd=1)
+            sw = tk.Label(row, width=4, bg=p.theme[k], relief="solid", bd=1)
             sw.pack(side="right")
             self.swatches[k] = sw
 
-        # Editor: preview, HEX, RGB
-        ed = tk.Frame(win, bg=self.BG)
+        tk.Checkbutton(tab, text="Auto accent color from the album cover",
+                       variable=p.auto_var, command=p.on_auto_accent_toggle,
+                       bg=self.BG, fg=self.FG, selectcolor=self.FIELD,
+                       activebackground=self.BG, activeforeground=self.FG, anchor="w")\
+            .pack(fill="x", padx=14, pady=(4, 0))
+
+        ed = tk.Frame(tab, bg=self.BG)
         ed.pack(fill="x", padx=14, pady=(10, 2))
         self.preview = tk.Label(ed, width=9, height=3, relief="solid", bd=1)
         self.preview.grid(row=0, column=0, rowspan=2, padx=(0, 12), sticky="n")
-
         tk.Label(ed, text="HEX", bg=self.BG, fg=self.FG).grid(row=0, column=1, sticky="w")
         self.entry = tk.Entry(ed, textvariable=self.hex_var, width=10, bg=self.FIELD,
                               fg=self.FG, insertbackground=self.FG, relief="flat",
@@ -554,12 +723,12 @@ class SettingsWindow:
         self.entry.bind("<KeyRelease>", self.on_hex)
         self.entry.bind("<Return>", self.on_hex)
         tk.Button(ed, text="Pick color…", command=self.pick, bg=self.BTN, fg=self.FG,
-                  activebackground="#444444", activeforeground=self.FG,
+                  activebackground=self.HOVER, activeforeground=self.FG,
                   relief="flat", bd=0, padx=8, pady=2)\
             .grid(row=0, column=3, padx=4)
 
         self.scales = {}
-        sf = tk.Frame(win, bg=self.BG)
+        sf = tk.Frame(tab, bg=self.BG)
         sf.pack(fill="x", padx=14, pady=(6, 0))
         for i, (ch, col) in enumerate((("R", "#ff6b6b"), ("G", "#5fd068"), ("B", "#6aa8ff"))):
             tk.Label(sf, text=ch, bg=self.BG, fg=col, width=2,
@@ -571,43 +740,65 @@ class SettingsWindow:
             s.grid(row=i, column=1, padx=4)
             self.scales[ch] = s
 
-        # Window: size and lyrics
-        tk.Label(win, text="Window", bg=self.BG, fg=self.FG, font=head)\
+    def build_window_tab(self, tab):
+        p = self.player
+        head = ("Segoe UI", 10, "bold")
+
+        def slider(parent, label, lo, hi, cmd):
+            row = tk.Frame(parent, bg=self.BG)
+            row.pack(fill="x", padx=14, pady=(2, 0))
+            tk.Label(row, text=label, bg=self.BG, fg=self.FG, width=11, anchor="w").pack(side="left")
+            s = tk.Scale(row, from_=lo, to=hi, resolution=5, orient="horizontal", length=250,
+                         command=cmd, bg=self.BG, fg=self.FG, troughcolor=self.FIELD,
+                         highlightthickness=0, bd=0, activebackground=GREEN)
+            s.pack(side="left", padx=4)
+            return s
+
+        tk.Label(tab, text="Appearance", bg=self.BG, fg=self.FG, font=head)\
             .pack(anchor="w", padx=14, pady=(12, 2))
-        zf = tk.Frame(win, bg=self.BG)
-        zf.pack(fill="x", padx=14)
-        tk.Label(zf, text="Size (%)", bg=self.BG, fg=self.FG, width=8, anchor="w")\
-            .grid(row=0, column=0)
-        self.size_scale = tk.Scale(zf, from_=int(SCALE_MIN * 100), to=int(SCALE_MAX * 100),
-                                   resolution=5, orient="horizontal", length=280,
-                                   command=self.on_size, bg=self.BG, fg=self.FG,
-                                   troughcolor=self.FIELD, highlightthickness=0, bd=0,
-                                   activebackground=GREEN)
-        self.size_scale.grid(row=0, column=1, padx=4)
-        tk.Checkbutton(win, text="Show synced lyrics (from LRCLIB)", variable=player.lyrics_var,
-                       command=player.on_lyrics_toggle, bg=self.BG, fg=self.FG,
-                       selectcolor=self.FIELD, activebackground=self.BG,
-                       activeforeground=self.FG, anchor="w")\
-            .pack(fill="x", padx=14, pady=(4, 0))
-        tk.Label(win, text="Tip: Ctrl + mouse wheel over the player also resizes it.",
+        self.size_scale = slider(tab, "Size (%)", int(SCALE_MIN * 100), int(SCALE_MAX * 100), self.on_size)
+        self.opacity_scale = slider(tab, "Opacity (%)", int(OPACITY_MIN * 100), 100, self.on_opacity)
+
+        tk.Label(tab, text="Font", bg=self.BG, fg=self.FG, font=head)\
+            .pack(anchor="w", padx=14, pady=(12, 2))
+        fr = tk.Frame(tab, bg=self.BG)
+        fr.pack(fill="x", padx=14)
+        try:
+            style = ttk.Style(self.win)
+            style.theme_use("clam")
+            style.configure("TCombobox", fieldbackground=self.FIELD, background=self.BTN,
+                            foreground=self.FG, arrowcolor=self.FG, bordercolor=self.BTN,
+                            lightcolor=self.FIELD, darkcolor=self.FIELD)
+            style.map("TCombobox", fieldbackground=[("readonly", self.FIELD)],
+                      foreground=[("readonly", self.FG)])
+            self.win.option_add("*TCombobox*Listbox.background", self.FIELD)
+            self.win.option_add("*TCombobox*Listbox.foreground", self.FG)
+        except Exception:
+            pass
+        fonts = sorted({f for f in tkfont.families(self.win) if not f.startswith("@")},
+                       key=str.lower)
+        self.font_box = ttk.Combobox(fr, textvariable=self.font_var, values=fonts, width=34)
+        self.font_box.pack(side="left")
+        self.font_box.bind("<<ComboboxSelected>>", self.on_font)
+        self.font_box.bind("<Return>", self.on_font)
+        tk.Label(tab, text="Pick any installed font, or type its name and press Enter.",
                  bg=self.BG, fg="#8a8a8a", font=("Segoe UI", 8), anchor="w")\
             .pack(fill="x", padx=16)
 
-        # Bottom buttons
-        bf = tk.Frame(win, bg=self.BG)
-        bf.pack(fill="x", padx=14, pady=12)
-        tk.Button(bf, text="Reset all", command=self.reset_all,
-                  bg=self.BTN, fg=self.FG, activebackground="#444444",
-                  activeforeground=self.FG, relief="flat", bd=0, padx=10, pady=4)\
-            .pack(side="left")
-        tk.Button(bf, text="Close", command=self.close, bg=GREEN, fg="#000000",
-                  activebackground="#1ed760", activeforeground="#000000",
-                  relief="flat", bd=0, padx=16, pady=4)\
-            .pack(side="right")
-
-        self.load_editor()
-        self.sync_scale()
-        self.place()
+        tk.Label(tab, text="Modes", bg=self.BG, fg=self.FG, font=head)\
+            .pack(anchor="w", padx=14, pady=(12, 2))
+        for text, var, cmd in (
+            ("Compact mode (double-click the player)", p.compact_var, p.on_compact_toggle),
+            ("Show synced lyrics (from LRCLIB)", p.lyrics_var, p.on_lyrics_toggle),
+            ("Always on top", p.topmost_var, p.apply_topmost),
+        ):
+            tk.Checkbutton(tab, text=text, variable=var, command=cmd, bg=self.BG, fg=self.FG,
+                           selectcolor=self.FIELD, activebackground=self.BG,
+                           activeforeground=self.FG, anchor="w")\
+                .pack(fill="x", padx=14)
+        tk.Label(tab, text="Tips: mouse wheel = volume, Ctrl + wheel = resize.",
+                 bg=self.BG, fg="#8a8a8a", font=("Segoe UI", 8), anchor="w")\
+            .pack(fill="x", padx=16, pady=(6, 0))
 
     def place(self):
         win, p = self.win, self.player
@@ -620,7 +811,7 @@ class SettingsWindow:
             y = max(10, p.pos_y - h - 12)
         win.geometry(f"+{x}+{y}")
 
-    # -- Editor ---------------------------------------------------------------
+    # -- Color editor ---------------------------------------------------------------
     def current(self):
         return self.player.theme[self.key.get()]
 
@@ -683,24 +874,43 @@ class SettingsWindow:
         self.refresh_swatches()
         self.load_editor()
 
-    # -- Window size ------------------------------------------------------------
+    # -- Window tab ---------------------------------------------------------------
     def on_size(self, value):
-        if self.updating:
-            return
-        self.player.set_scale(float(value) / 100.0)
+        if not self.updating:
+            self.player.set_scale(float(value) / 100.0)
+
+    def on_opacity(self, value):
+        if not self.updating:
+            self.player.set_opacity(float(value) / 100.0)
+
+    def on_font(self, _event=None):
+        if not self.player.set_font(self.font_var.get()):
+            self.font_var.set(self.player.font_family)  # invalid name: revert
 
     def sync_scale(self):
         self.updating = True
         self.size_scale.set(int(round(self.player.scale * 100)))
         self.updating = False
 
+    def sync_window_controls(self):
+        self.updating = True
+        self.size_scale.set(int(round(self.player.scale * 100)))
+        self.opacity_scale.set(int(round(self.player.opacity * 100)))
+        self.font_var.set(self.player.font_family)
+        self.updating = False
+
     def reset_all(self):
+        p = self.player
         self.apply_preset("Black")
-        self.player.set_scale(1.0)
-        self.sync_scale()
-        if not self.player.lyrics_var.get():
-            self.player.lyrics_var.set(True)
-            self.player.on_lyrics_toggle()
+        p.set_scale(1.0)
+        p.set_opacity(OPACITY_DEFAULT)
+        p.set_font(FONT_FAMILY)
+        p.auto_var.set(True)
+        p.lyrics_var.set(True)
+        p.compact_var.set(False)
+        p.on_auto_accent_toggle()
+        p.apply_modes()
+        self.sync_window_controls()
 
     def close(self):
         self.player.settings = None
@@ -712,9 +922,10 @@ class SettingsWindow:
 # Main UI
 # ----------------------------------------------------------------------------
 class MiniPlayer:
-    def __init__(self, root, backend):
+    def __init__(self, root, backend, volume=None):
         self.root = root
         self.backend = backend
+        self.volume = volume if volume is not None else VolumeController()
         self.settings = None
         self.lyrics_store = LyricsStore()
 
@@ -731,13 +942,21 @@ class MiniPlayer:
             self.scale = round(clamp(sc, SCALE_MIN, SCALE_MAX), 2)
         except (TypeError, ValueError):
             self.scale = 1.0
+        try:
+            self.opacity = round(clamp(float(cfg.get("opacity", OPACITY_DEFAULT)), OPACITY_MIN, 1.0), 2)
+        except (TypeError, ValueError):
+            self.opacity = OPACITY_DEFAULT
         self.s = self.scale
 
         # Borderless, rounded corners, always on top
         root.overrideredirect(True)
         self.topmost_var = tk.BooleanVar(value=bool(cfg.get("topmost", True)))
         self.lyrics_var = tk.BooleanVar(value=bool(cfg.get("lyrics", True)))
+        self.compact_var = tk.BooleanVar(value=bool(cfg.get("compact", False)))
+        self.auto_var = tk.BooleanVar(value=bool(cfg.get("auto_accent", True)))
         self.lyrics_on = bool(self.lyrics_var.get())
+        self.compact = bool(self.compact_var.get())
+        self.auto_accent = bool(self.auto_var.get())
         root.attributes("-topmost", self.topmost_var.get())
         root.configure(bg=KEY)
         try:
@@ -745,19 +964,29 @@ class MiniPlayer:
         except tk.TclError:
             pass
 
-        fam = FONT_FAMILY
+        # Fonts (the family can be changed in the settings)
+        self.font_family = FONT_FAMILY
+        saved_font = cfg.get("font")
+        if isinstance(saved_font, str):
+            exact = {f.lower(): f for f in tkfont.families(root)}.get(saved_font.strip().lower())
+            if exact:
+                self.font_family = exact
+        fam = self.font_family
         self.f_label = tkfont.Font(family=fam, size=-12)
         self.f_title = tkfont.Font(family=fam, size=-16, weight="bold")
         self.f_artist = tkfont.Font(family=fam, size=-13)
         self.f_time = tkfont.Font(family=fam, size=-12)
         self.f_cover_note = tkfont.Font(family=fam, size=-29)
+        self.f_cover_note_c = tkfont.Font(family=fam, size=-17)
         self.f_logo_note = tkfont.Font(family=fam, size=-21)
         self.f_lyr = tkfont.Font(family=fam, size=-14)
         self.f_lyr_cur = tkfont.Font(family=fam, size=-16, weight="bold")
         self.f_lyr_msg = tkfont.Font(family=fam, size=-13)
+        self.f_compact = tkfont.Font(family=fam, size=-14, weight="bold")
         self.font_specs = [(self.f_label, 12), (self.f_title, 16), (self.f_artist, 13),
-                           (self.f_time, 12), (self.f_cover_note, 29), (self.f_logo_note, 21),
-                           (self.f_lyr, 14), (self.f_lyr_cur, 16), (self.f_lyr_msg, 13)]
+                           (self.f_time, 12), (self.f_cover_note, 29), (self.f_cover_note_c, 17),
+                           (self.f_logo_note, 21), (self.f_lyr, 14), (self.f_lyr_cur, 16),
+                           (self.f_lyr_msg, 13), (self.f_compact, 14)]
         self.compute_layout()
 
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -788,6 +1017,7 @@ class MiniPlayer:
         self.cover_frames = []
         self.cover_idx = -1
         self.cover_anim = 0.0
+        self.cov = (COVER_X, COVER_Y, COVER)
         self.disp_pos = 0.0
         self.eq_h = [3.0] * 4
         self.hover = False
@@ -813,6 +1043,9 @@ class MiniPlayer:
         self.dragged = False
         self.save_job = None
         self.relayout_job = None
+        # accent color (animated; can follow the album cover)
+        self.accent_cur = self.theme["accent"]
+        self.accent_target = self.theme["accent"]
         # seeking
         self.seeking = False
         self.seek_pos = 0.0
@@ -820,6 +1053,14 @@ class MiniPlayer:
         self.seek_hold_pos = 0.0
         self.seek_hold_t0 = 0.0
         self.bar_hot = 0.0
+        # volume
+        self.vol_ui = None
+        self.vol_drag = False
+        self.vol_drag_level = 0.0
+        self.vol_visible = False
+        self.flash_until = 0.0
+        self.flash_pct = 0
+        self.flash_active = False
         # lyrics
         self.lyr_key = None
         self.lyr_lines = []
@@ -840,10 +1081,14 @@ class MiniPlayer:
 
     def compute_layout(self):
         self.s = self.scale
-        self.W = int(round(W0 * self.s))
-        self.H = int(round((H0 + (LYR_H0 if self.lyrics_on else 0)) * self.s))
+        if self.compact:
+            w0, h0 = CW0, CH0
+        else:
+            w0, h0 = W0, H0 + (LYR_H0 if self.lyrics_on else 0)
+        self.W = int(round(w0 * self.s))
+        self.H = int(round(h0 * self.s))
         for font, px in self.font_specs:
-            font.configure(size=-max(6, int(round(px * self.s))))
+            font.configure(family=self.font_family, size=-max(6, int(round(px * self.s))))
 
     def set_scale(self, value):
         value = round(clamp(round(value / SCALE_STEP) * SCALE_STEP, SCALE_MIN, SCALE_MAX), 2)
@@ -855,22 +1100,58 @@ class MiniPlayer:
                 self.settings.sync_scale()
             except tk.TclError:
                 pass
+        self.request_relayout()
+        self.schedule_save()
+
+    def request_relayout(self):
         if self.relayout_job is not None:
             self.root.after_cancel(self.relayout_job)
         self.relayout_job = self.root.after(120, self.do_relayout)
-        self.schedule_save()
 
     def do_relayout(self):
         self.relayout_job = None
         self.relayout()
 
-    def on_lyrics_toggle(self):
+    def apply_modes(self):
         self.lyrics_on = bool(self.lyrics_var.get())
+        self.compact = bool(self.compact_var.get())
         self.relayout()
         self.schedule_save()
 
+    def on_lyrics_toggle(self):
+        self.apply_modes()
+
+    def on_compact_toggle(self):
+        self.apply_modes()
+
+    def on_auto_accent_toggle(self):
+        self.auto_accent = bool(self.auto_var.get())
+        self.refresh_accent_target(snap=False)
+        self.schedule_save()
+
+    def set_opacity(self, value):
+        self.opacity = round(clamp(value, OPACITY_MIN, 1.0), 2)
+        if self.intro_done:
+            try:
+                self.root.attributes("-alpha", self.opacity)
+            except tk.TclError:
+                pass
+        self.schedule_save()
+
+    def set_font(self, name):
+        """Changes the font family. Returns False if the font isn't installed."""
+        name = (name or "").strip()
+        exact = {f.lower(): f for f in tkfont.families(self.root)}.get(name.lower())
+        if not exact:
+            return False
+        if exact != self.font_family:
+            self.font_family = exact
+            self.request_relayout()
+            self.schedule_save()
+        return True
+
     def relayout(self):
-        """Rebuilds the whole canvas for a new size / lyrics setting."""
+        """Rebuilds the whole canvas for a new size / mode / font."""
         now = time.time()
         self.compute_layout()
         self.ripples = []
@@ -878,45 +1159,94 @@ class MiniPlayer:
         self.cv.config(width=self.W, height=self.H)
         if not self.intro_done:
             self.intro_done = True
-            try:
-                self.root.attributes("-alpha", 0.97)
-            except tk.TclError:
-                pass
+        try:
+            self.root.attributes("-alpha", self.opacity)
+        except tk.TclError:
+            pass
         self.root.geometry(f"{self.W}x{self.H}+{self.pos_x}+{self.pos_y}")
         self.build()
         self.apply_theme()
         self.last_playing = None
         self.last_times = ("", "")
         self.icon_dirty = True
+        self.vol_visible = False
+        self.seeking = False
+        self.vol_drag = False
+        self.press_target = None
         self.hl_x = self.S(BTN_X["toggle"])
         data = self.cover_src if isinstance(self.cover_src, (bytes, bytearray)) else None
         self.set_cover(data, now - 10)
         self.apply_track_texts()
         self.anim_start = now - 10
         self.texts_settled = False
+        self.flash_active = False
         self.prepare_lyrics()
         self.lyr_msg_cache = None
 
     # -- Drawing ----------------------------------------------------------------
+    def reset_items(self):
+        for name in ("bg_item", "cover_ph", "cover_note", "cover_item", "t_now", "t_title",
+                     "t_artist", "bar_bg", "bar_fg", "knob", "t_left", "t_right", "logo_note",
+                     "gear", "gear_hole", "hl", "ic_prev_bar", "ic_prev_tri", "play_icon",
+                     "ic_next_bar", "ic_next_tri", "lyr_div", "t_lyr_msg", "vol_icon",
+                     "vol_track", "vol_fill", "vol_knob"):
+            setattr(self, name, None)
+        self.logo = []
+        self.eq = []
+        self.pause_icons = []
+        self.icon_items = []
+        self.text_items = []
+        self.lyr_slots = []
+        self.vol_waves = []
+        self.vol_items = []
+
     def build(self):
+        self.reset_items()
+        if self.compact:
+            self.build_compact()
+        else:
+            self.build_full()
+        self.slot_cache = ["hidden"] * len(self.lyr_slots)
+
+    def build_cover(self):
+        cv, S = self.cv, self.S
+        x, y, size = self.cov
+        cx, cy = S(x + size / 2), S(y + size / 2)
+        self.cover_ph = cv.create_rectangle(S(x), S(y), S(x + size), S(y + size),
+                                            fill="#000000", outline="")
+        self.cover_note = cv.create_text(
+            cx, cy, text="♪", font=self.f_cover_note_c if self.compact else self.f_cover_note)
+        self.cover_item = cv.create_image(cx, cy, state="hidden")
+
+    def build_compact(self):
+        cv, S, W, H = self.cv, self.S, self.W, self.H
+        self.bg_item = rounded_rect(cv, 1, 1, W - 1, H - 1, S(14),
+                                    fill="#000000", outline="#000000", width=1)
+        self.cov = (C_COVER_X, C_COVER_Y, C_COVER)
+        self.build_cover()
+        self.t_title = cv.create_text(S(C_TX), S(C_TITLE_Y), text="", anchor="w", font=self.f_compact)
+        self.text_items = [(self.t_title, S(C_TX), S(C_TITLE_Y), "title", 0.0)]
+        bw = max(2, int(round(S(2))))
+        self.bar_bg = cv.create_line(S(C_TX), S(C_BAR_Y), S(CW0 - 12), S(C_BAR_Y),
+                                     width=bw, capstyle="round")
+        self.bar_fg = cv.create_line(S(C_TX), S(C_BAR_Y), S(C_TX), S(C_BAR_Y),
+                                     width=bw, capstyle="round")
+        self.eq = [cv.create_rectangle(0, 0, 0, 0, outline="") for _ in range(4)]
+
+    def build_full(self):
         cv, S, W, H = self.cv, self.S, self.W, self.H
         self.bg_item = rounded_rect(cv, 1, 1, W - 1, H - 1, S(16),
                                     fill="#000000", outline="#000000", width=1)
-
-        # Cover (placeholder + real cover)
-        cx, cy = S(COVER_X + COVER / 2), S(COVER_Y + COVER / 2)
-        self.cover_ph = cv.create_rectangle(S(COVER_X), S(COVER_Y), S(COVER_X + COVER),
-                                            S(COVER_Y + COVER), fill="#000000", outline="")
-        self.cover_note = cv.create_text(cx, cy, text="♪", font=self.f_cover_note)
-        self.cover_item = cv.create_image(cx, cy, state="hidden")
+        self.cov = (COVER_X, COVER_Y, COVER)
+        self.build_cover()
 
         # Texts
         self.t_now = cv.create_text(S(TX), S(22), text="now playing", anchor="w", font=self.f_label)
         self.t_title = cv.create_text(S(TX), S(TITLE_Y), text="", anchor="w", font=self.f_title)
         self.t_artist = cv.create_text(S(TX), S(ARTIST_Y), text="", anchor="w", font=self.f_artist)
-        # (item, y, color key, delay in s)
-        self.text_items = [(self.t_title, S(TITLE_Y), "title", 0.0),
-                           (self.t_artist, S(ARTIST_Y), "text2", 0.08)]
+        # (item, x, y, color key, delay in s)
+        self.text_items = [(self.t_title, S(TX), S(TITLE_Y), "title", 0.0),
+                           (self.t_artist, S(TX), S(ARTIST_Y), "text2", 0.08)]
 
         # Progress bar and times
         bw = max(2, int(round(S(3))))
@@ -944,6 +1274,25 @@ class MiniPlayer:
 
         self.eq = [cv.create_rectangle(0, 0, 0, 0, outline="") for _ in range(4)]
 
+        # Volume slider (top row, revealed on hover)
+        vy, ix = S(VOL_Y), S(VOL_ICON_X)
+        self.vol_icon = cv.create_polygon(
+            ix - S(6), vy - S(3), ix - S(3), vy - S(3), ix + S(1), vy - S(6),
+            ix + S(1), vy + S(6), ix - S(3), vy + S(3), ix - S(6), vy + S(3),
+            outline="", state="hidden")
+        self.vol_waves = []
+        for r in (4, 7):
+            self.vol_waves.append(cv.create_arc(
+                ix + S(1) - S(r), vy - S(r), ix + S(1) + S(r), vy + S(r),
+                start=-40, extent=80, style="arc", width=max(1, S(1.5)), state="hidden"))
+        vw = max(2, int(round(S(3))))
+        self.vol_track = cv.create_line(S(VOL_X1), vy, S(VOL_X2), vy, width=vw,
+                                        capstyle="round", state="hidden")
+        self.vol_fill = cv.create_line(S(VOL_X1), vy, S(VOL_X1), vy, width=vw,
+                                       capstyle="round", state="hidden")
+        self.vol_knob = cv.create_oval(0, 0, 0, 0, outline="", state="hidden")
+        self.vol_items = [self.vol_icon, *self.vol_waves, self.vol_track, self.vol_fill, self.vol_knob]
+
         # Highlight circle that follows the mouse (below the buttons)
         self.hl = cv.create_oval(0, 0, 0, 0, outline="")
 
@@ -961,16 +1310,12 @@ class MiniPlayer:
         self.placed_dx = 0.0
 
         # Lyrics panel
-        self.lyr_slots = []
-        self.lyr_div = None
-        self.t_lyr_msg = None
         if self.lyrics_on:
             self.lyr_div = cv.create_line(S(16), S(LYR_TOP0 - 2), W - S(16), S(LYR_TOP0 - 2), width=1)
             self.lyr_slots = [cv.create_text(W / 2, 0, text="", font=self.f_lyr, state="hidden")
                               for _ in range(LYR_SLOTS)]
             self.t_lyr_msg = cv.create_text(W / 2, S(LYR_TOP0 + LYR_H0 / 2), text="",
                                             font=self.f_lyr_msg, state="hidden")
-        self.slot_cache = ["hidden"] * len(self.lyr_slots)
 
     def place_buttons(self, dx):
         S, c, by = self.S, self.cv.coords, self.S(BTN_Y)
@@ -983,30 +1328,66 @@ class MiniPlayer:
         c(self.ic_next_bar, n + S(4), by - S(5), n + S(6), by + S(5))
         c(self.ic_next_tri, n - S(5), by - S(5), n - S(5), by + S(5), n + S(4), by)
 
+    def cfg(self, item, **kw):
+        if item is not None:
+            self.cv.itemconfig(item, **kw)
+
     def apply_theme(self):
         """Applies theme colors to static items (animated items read the theme each frame)."""
-        t, cv = self.theme, self.cv
+        t = self.theme
         bg = t["bg"]
-        cv.itemconfig(self.bg_item, fill=bg, outline=t["border"])
-        cv.itemconfig(self.cover_ph, fill=mix(bg, "#000000", 0.3))
-        cv.itemconfig(self.cover_note, fill=t["text2"])
-        cv.itemconfig(self.t_now, fill=t["text2"])
-        cv.itemconfig(self.bar_bg, fill=mix(bg, t["title"], 0.22))
-        cv.itemconfig(self.bar_fg, fill=t["accent"])
-        cv.itemconfig(self.knob, fill=t["accent"])
-        cv.itemconfig(self.t_left, fill=t["text2"])
-        cv.itemconfig(self.t_right, fill=t["text2"])
-        cv.itemconfig(self.logo_note, fill=t["text2"])
-        cv.itemconfig(self.gear_hole, fill=bg)
-        for bar in self.eq:
-            cv.itemconfig(bar, fill=t["accent"])
-        if self.lyr_div is not None:
-            cv.itemconfig(self.lyr_div, fill=mix(bg, t["text2"], 0.18))
+        self.cfg(self.bg_item, fill=bg, outline=t["border"])
+        self.cfg(self.cover_ph, fill=mix(bg, "#000000", 0.3))
+        self.cfg(self.cover_note, fill=t["text2"])
+        self.cfg(self.t_now, fill=t["text2"])
+        self.cfg(self.bar_bg, fill=mix(bg, t["title"], 0.22))
+        self.cfg(self.t_left, fill=t["text2"])
+        self.cfg(self.t_right, fill=t["text2"])
+        self.cfg(self.logo_note, fill=t["text2"])
+        self.cfg(self.gear_hole, fill=bg)
+        self.cfg(self.lyr_div, fill=mix(bg, t["text2"], 0.18))
         self.slot_cache = [None] * len(self.lyr_slots)
         self.lyr_msg_cache = None
         self.texts_settled = False
         self.icon_dirty = True
+        self.refresh_accent_target(snap=True)
 
+    # -- Accent color -------------------------------------------------------------
+    def refresh_accent_target(self, snap):
+        target = self.theme["accent"]
+        if self.auto_accent and isinstance(self.cover_src, (bytes, bytearray)):
+            c = dominant_color(self.cover_src, self.theme["bg"])
+            if c:
+                target = c
+        self.accent_target = target.lower()
+        if snap:
+            self.accent_cur = self.accent_target
+            self.apply_accent_items()
+
+    def apply_accent_items(self):
+        c = self.accent_cur
+        self.cfg(self.bar_fg, fill=c)
+        self.cfg(self.knob, fill=c)
+        for bar in self.eq:
+            self.cfg(bar, fill=c)
+
+    def update_accent(self):
+        if self.accent_cur == self.accent_target:
+            return
+        out = []
+        for x, y in zip(hex_rgb(self.accent_cur), hex_rgb(self.accent_target)):
+            d = y - x
+            if d:
+                step = d * 0.15
+                if abs(step) < 1:
+                    step = 1 if d > 0 else -1   # always make progress, never stall
+                x = int(round(x + step))
+                x = min(x, y) if d > 0 else max(x, y)
+            out.append(x)
+        self.accent_cur = "#%02x%02x%02x" % tuple(out)
+        self.apply_accent_items()
+
+    # -- Events -------------------------------------------------------------------
     def bind_events(self):
         cv = self.cv
         cv.bind("<Enter>", self.on_motion)
@@ -1015,11 +1396,15 @@ class MiniPlayer:
         cv.bind("<ButtonPress-1>", self.on_press)
         cv.bind("<B1-Motion>", self.on_drag)
         cv.bind("<ButtonRelease-1>", self.on_release)
-        cv.bind("<Control-MouseWheel>", self.on_wheel)
+        cv.bind("<Double-Button-1>", self.on_double)
+        cv.bind("<MouseWheel>", self.on_scroll)
+        cv.bind("<Control-MouseWheel>", self.on_zoom)
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_checkbutton(label="Always on top", variable=self.topmost_var,
                                   command=self.apply_topmost)
+        self.menu.add_checkbutton(label="Compact mode", variable=self.compact_var,
+                                  command=self.on_compact_toggle)
         self.menu.add_checkbutton(label="Show lyrics", variable=self.lyrics_var,
                                   command=self.on_lyrics_toggle)
         self.menu.add_command(label="Settings…", command=self.open_settings)
@@ -1032,7 +1417,12 @@ class MiniPlayer:
         st = self.backend.state
         return bool(st["available"] and st["duration_ms"] > 0)
 
+    def volume_ready(self):
+        return bool(self.volume.available and self.volume.level is not None)
+
     def hit_test(self, x, y):
+        if self.compact:
+            return None
         S = self.S
         gx, gy = S(GEAR_POS[0]), S(GEAR_POS[1])
         if (x - gx) ** 2 + (y - gy) ** 2 <= S(13) ** 2:
@@ -1041,6 +1431,9 @@ class MiniPlayer:
             for name in ("prev", "toggle", "next"):
                 if abs(x - (S(BTN_X[name]) + self.btn_dx)) <= S(15) and abs(y - S(BTN_Y)) <= S(14):
                     return name
+            if self.volume_ready() and abs(y - S(VOL_Y)) <= S(10) \
+                    and S(VOL_ICON_X) - S(8) <= x <= S(VOL_X2) + S(8):
+                return "volume"
         if self.can_seek() and abs(y - S(BAR_Y)) <= S(10) and S(BAR_X1) - S(8) <= x <= S(BAR_X2) + S(8):
             return "seek"
         return None
@@ -1054,8 +1447,28 @@ class MiniPlayer:
         self.hover = False
         self.cv.config(cursor="")
 
-    def on_wheel(self, e):
+    def on_zoom(self, e):
+        """Ctrl + mouse wheel: resize."""
         self.set_scale(self.scale + (SCALE_STEP if e.delta > 0 else -SCALE_STEP))
+
+    def on_scroll(self, e):
+        """Mouse wheel: volume."""
+        if not self.volume_ready():
+            return
+        step = VOLUME_STEP if e.delta > 0 else -VOLUME_STEP
+        level = clamp(self.volume.level + step)
+        self.volume.set(level)
+        self.flash_volume(level, time.time())
+
+    def flash_volume(self, level, now):
+        self.flash_pct = int(round(level * 100))
+        self.flash_until = now + 1.2
+
+    def on_double(self, e):
+        """Double-click on an empty area: toggle compact mode."""
+        if self.hit_test(e.x, e.y) is None:
+            self.compact_var.set(not self.compact_var.get())
+            self.on_compact_toggle()
 
     def update_seek(self, x):
         dur = self.backend.state["duration_ms"]
@@ -1074,6 +1487,12 @@ class MiniPlayer:
         st["position_ms"], st["updated_at"] = pos, now
         self.backend.seek(pos)
 
+    def update_volume_from_x(self, x):
+        level = clamp((x - self.S(VOL_X1)) / self.S(VOL_X2 - VOL_X1))
+        self.vol_drag_level = level
+        self.volume.set(level)
+        self.flash_volume(level, time.time())
+
     def on_press(self, e):
         self.mx, self.my = e.x, e.y
         self.press_target = self.hit_test(e.x, e.y)
@@ -1081,6 +1500,9 @@ class MiniPlayer:
         if self.press_target == "seek":
             self.seeking = True
             self.update_seek(e.x)
+        elif self.press_target == "volume":
+            self.vol_drag = True
+            self.update_volume_from_x(e.x)
         elif self.press_target is None:
             self.drag_dx = e.x_root - self.root.winfo_x()
             self.drag_dy = e.y_root - self.root.winfo_y()
@@ -1089,6 +1511,9 @@ class MiniPlayer:
         self.mx, self.my = e.x, e.y
         if self.press_target == "seek":
             self.update_seek(e.x)
+            return
+        if self.press_target == "volume":
+            self.update_volume_from_x(e.x)
             return
         if self.press_target is not None or not self.intro_done:
             return
@@ -1101,6 +1526,9 @@ class MiniPlayer:
         if self.press_target == "seek":
             self.update_seek(e.x)
             self.finish_seek()
+        elif self.press_target == "volume":
+            self.update_volume_from_x(e.x)
+            self.vol_drag = False
         else:
             target = self.hit_test(e.x, e.y)
             if self.press_target and target == self.press_target:
@@ -1139,7 +1567,7 @@ class MiniPlayer:
     def add_ripple(self, x, now):
         S = self.S
         item = self.cv.create_oval(x - S(6), S(BTN_Y) - S(6), x + S(6), S(BTN_Y) + S(6),
-                                   outline=self.theme["accent"], width=2)
+                                   outline=self.accent_cur, width=2)
         self.ripples.append((item, x, now))
 
     def show_menu(self, e):
@@ -1187,7 +1615,9 @@ class MiniPlayer:
 
     def save_config(self):
         self.save_job = None
-        write_config({"theme": self.theme, "scale": self.scale, "lyrics": self.lyrics_on,
+        write_config({"theme": self.theme, "scale": self.scale, "opacity": self.opacity,
+                      "font": self.font_family, "lyrics": self.lyrics_on,
+                      "compact": self.compact, "auto_accent": self.auto_accent,
                       "x": self.pos_x, "y": self.pos_y,
                       "topmost": bool(self.topmost_var.get())})
 
@@ -1198,17 +1628,25 @@ class MiniPlayer:
             st = self.backend.state
             self.intro(now)
             self.sync_track(st, now)
+            self.update_accent()
             self.nudge *= 0.84
             if abs(self.nudge) < 0.2:
                 self.nudge = 0.0
+            self.update_vol_state()
             self.layout_texts(now)
             self.layout_cover(now)
-            self.update_progress(st, now)
-            self.update_lyrics(st, now)
-            self.update_eq(st, now)
-            self.update_buttons(st)
-            self.update_gear()
-            self.update_ripples(now)
+            self.update_flash(now)
+            if self.compact:
+                self.update_progress_compact(st, now)
+                self.update_eq(st, now)
+            else:
+                self.update_progress(st, now)
+                self.update_lyrics(st, now)
+                self.update_eq(st, now)
+                self.update_buttons(st)
+                self.update_volume(now)
+                self.update_gear()
+                self.update_ripples(now)
         finally:
             self.root.after(33, self.frame)
 
@@ -1218,7 +1656,7 @@ class MiniPlayer:
         p = clamp((now - self.intro_start) / 0.6)
         e = ease_out(p)
         try:
-            self.root.attributes("-alpha", 0.97 * e)
+            self.root.attributes("-alpha", self.opacity * e)
         except tk.TclError:
             pass
         self.root.geometry(f"+{self.pos_x}+{int(self.pos_y + (1 - e) * self.S(30))}")
@@ -1233,6 +1671,9 @@ class MiniPlayer:
         else:
             title, artist = "Nothing playing", "Start a song in Spotify"
         S = self.S
+        if self.compact:
+            self.cv.itemconfig(self.t_title, text=fit(self.f_compact, title, S(CW0 - C_TX - 44)))
+            return
         self.cv.itemconfig(self.t_title, text=fit(self.f_title, title, S(W0 - TX - 16)))
         self.cv.itemconfig(self.t_artist, text=fit(self.f_artist, artist, S(W0 - TX - 124)))
 
@@ -1249,6 +1690,7 @@ class MiniPlayer:
         if key != self.shown_key:
             self.shown_key = key
             self.apply_track_texts(st)
+            self.flash_active = False
             self.anim_start = now
             self.texts_settled = False
             # If a skip button was pressed, the new song slides in from that side.
@@ -1259,6 +1701,7 @@ class MiniPlayer:
         cover = st["cover"] if available else None
         if cover is not self.cover_src:
             self.set_cover(cover, now)
+            self.refresh_accent_target(snap=False)
 
     def set_cover(self, data, now):
         self.cover_src = data
@@ -1269,7 +1712,7 @@ class MiniPlayer:
             try:
                 img = Image.open(io.BytesIO(data)).convert("RGB")
                 for f in (0.78, 0.86, 0.93, 0.98, 1.0):
-                    size = max(int(round(self.S(COVER) * f)), 8)
+                    size = max(int(round(self.S(self.cov[2]) * f)), 8)
                     frame = img.resize((size, size), Image.Resampling.LANCZOS)
                     self.cover_frames.append(ImageTk.PhotoImage(frame))
             except Exception:
@@ -1282,7 +1725,7 @@ class MiniPlayer:
     def layout_texts(self, now):
         S = self.S
         done = True
-        for item, y, ckey, delay in self.text_items:
+        for item, x, y, ckey, delay in self.text_items:
             color = self.theme[ckey]
             if self.texts_settled:
                 off, fill = 0.0, color
@@ -1293,17 +1736,17 @@ class MiniPlayer:
                 fill = mix(self.theme["bg"], color, e)
                 if p < 1:
                     done = False
-            self.cv.coords(item, S(TX) + off + self.nudge, y)
+            self.cv.coords(item, x + off + self.nudge, y)
             self.cv.itemconfig(item, fill=fill)
         if not self.texts_settled:
             self.texts_settled = done
 
     def layout_cover(self, now):
         S = self.S
+        x, y, size = self.cov
         off = self.nudge * 0.5
-        cx, cy = S(COVER_X + COVER / 2) + off, S(COVER_Y + COVER / 2)
-        self.cv.coords(self.cover_ph, S(COVER_X) + off, S(COVER_Y),
-                       S(COVER_X + COVER) + off, S(COVER_Y + COVER))
+        cx, cy = S(x + size / 2) + off, S(y + size / 2)
+        self.cv.coords(self.cover_ph, S(x) + off, S(y), S(x + size) + off, S(y + size))
         self.cv.coords(self.cover_note, cx, cy)
         self.cv.coords(self.cover_item, cx, cy)
 
@@ -1315,8 +1758,9 @@ class MiniPlayer:
                 self.cover_idx = idx
                 self.cv.itemconfig(self.cover_item, image=self.cover_frames[idx])
 
-    def update_progress(self, st, now):
-        S = self.S
+    # -- Progress -----------------------------------------------------------------
+    def current_position(self, st, now):
+        """Returns (target position ms, duration ms) and advances the displayed position."""
         available = st["available"]
         dur = st["duration_ms"] if available else 0.0
         playing = bool(available and st["playing"])
@@ -1341,6 +1785,11 @@ class MiniPlayer:
                 self.disp_pos = target          # big jump: go straight there
             else:
                 self.disp_pos += diff * 0.25    # small difference: glide
+        return dur
+
+    def update_progress(self, st, now):
+        S = self.S
+        dur = self.current_position(st, now)
 
         near = self.hover and abs(self.my - S(BAR_Y)) <= S(14) and dur > 0
         self.bar_hot += ((1.0 if (self.seeking or near) else 0.0) - self.bar_hot) * 0.25
@@ -1356,6 +1805,66 @@ class MiniPlayer:
             self.last_times = times
             self.cv.itemconfig(self.t_left, text=times[0])
             self.cv.itemconfig(self.t_right, text=times[1])
+
+    def update_progress_compact(self, st, now):
+        S = self.S
+        dur = self.current_position(st, now)
+        ratio = clamp(self.disp_pos / dur) if dur > 0 else 0.0
+        x = S(C_TX) + S(CW0 - 12 - C_TX) * ratio
+        self.cv.coords(self.bar_fg, S(C_TX), S(C_BAR_Y), x, S(C_BAR_Y))
+
+    # -- Volume -------------------------------------------------------------------
+    def update_vol_state(self):
+        """Eases the displayed volume toward the real one."""
+        if not self.volume_ready():
+            return
+        target = self.vol_drag_level if self.vol_drag else self.volume.level
+        if self.vol_ui is None:
+            self.vol_ui = target
+        else:
+            self.vol_ui += (target - self.vol_ui) * 0.35
+
+    def update_flash(self, now):
+        """Briefly shows 'volume NN%' in place of the 'now playing' label (or the title)."""
+        if now < self.flash_until:
+            text = f"volume {self.flash_pct}%"
+            if self.compact:
+                self.cv.itemconfig(self.t_title, text=text)
+            else:
+                self.cv.itemconfig(self.t_now, text=text)
+            self.flash_active = True
+        elif self.flash_active:
+            self.flash_active = False
+            if self.compact:
+                self.apply_track_texts()
+            else:
+                self.cv.itemconfig(self.t_now, text="now playing")
+
+    def update_volume(self, now):
+        S, t, cv = self.S, self.theme, self.cv
+        if self.vol_ui is None or not self.volume_ready() or self.hover_t < 0.02:
+            if self.vol_visible:
+                for item in self.vol_items:
+                    cv.itemconfig(item, state="hidden")
+                self.vol_visible = False
+            return
+        self.vol_visible = True
+        lvl = clamp(self.vol_ui)
+        h = self.hover_t
+        bg = t["bg"]
+        vy = S(VOL_Y)
+        x = S(VOL_X1) + S(VOL_X2 - VOL_X1) * lvl
+        kr = S(4.5 if self.vol_drag else 3.5)
+
+        cv.itemconfig(self.vol_icon, state="normal", fill=mix(bg, t["text2"], h))
+        for i, wave in enumerate(self.vol_waves):
+            shown = lvl > (0.02 if i == 0 else 0.5)
+            cv.itemconfig(wave, state="normal" if shown else "hidden", outline=mix(bg, t["text2"], h))
+        cv.itemconfig(self.vol_track, state="normal", fill=mix(bg, mix(bg, t["title"], 0.22), h))
+        cv.coords(self.vol_fill, S(VOL_X1), vy, x, vy)
+        cv.itemconfig(self.vol_fill, state="normal", fill=mix(bg, self.accent_cur, h))
+        cv.coords(self.vol_knob, x - kr, vy - kr, x + kr, vy + kr)
+        cv.itemconfig(self.vol_knob, state="normal", fill=mix(bg, t["title"], h))
 
     # -- Lyrics ---------------------------------------------------------------
     def prepare_lyrics(self):
@@ -1461,14 +1970,18 @@ class MiniPlayer:
     def update_eq(self, st, now):
         S = self.S
         playing = st["available"] and st["playing"]
+        if self.compact:
+            base_x, base_y = CW0 - 34, 34
+        else:
+            base_x, base_y = W0 - 100, 32
         for i, bar in enumerate(self.eq):
             if playing:
                 target = 4 + 12 * (0.5 + 0.5 * math.sin(now * (5 + i * 1.7) + i * 1.3))
             else:
                 target = 3
             self.eq_h[i] += (target - self.eq_h[i]) * 0.3
-            x0 = S(W0 - 100 + i * 6)
-            self.cv.coords(bar, x0, S(32) - S(self.eq_h[i]), x0 + S(4), S(32))
+            x0 = S(base_x + i * 6)
+            self.cv.coords(bar, x0, S(base_y) - S(self.eq_h[i]), x0 + S(4), S(base_y))
 
     def update_buttons(self, st):
         S, t, cv = self.S, self.theme, self.cv
@@ -1542,7 +2055,7 @@ class MiniPlayer:
             r = S(6 + 16 * ease_out(p))
             by = S(BTN_Y)
             self.cv.coords(item, x - r, by - r, x + r, by + r)
-            self.cv.itemconfig(item, outline=mix(self.theme["accent"], self.theme["bg"], p))
+            self.cv.itemconfig(item, outline=mix(self.accent_cur, self.theme["bg"], p))
             alive.append((item, x, t0))
         self.ripples = alive
 
