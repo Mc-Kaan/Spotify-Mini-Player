@@ -1,4 +1,4 @@
-<p align="center"><img src="logo.png" width="128" alt="Spotify Mini Player logo"></p>
+<p align="center"><img src="banner.png" width="800" alt="Spotify Mini Player"></p>
 
 # Spotify Mini Player
 
