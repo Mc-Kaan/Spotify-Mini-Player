@@ -2,7 +2,6 @@
 
 # Spotify Mini Player
 
-[Türkçe](README.md) | **English**
 
 A small, always-on-top music player window for Windows. It shows the current song's title, artist, album cover and elapsed time, and lets you control playback with previous, play/pause and next buttons.
 
