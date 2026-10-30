@@ -1,59 +1,63 @@
+<p align="center"><img src="assets/logo.png" width="128" alt="Spotify Mini Player logosu"></p>
+
 # Spotify Mini Player
 
+**Türkçe** | [English](README.en.md)
 
-A small, always-on-top music player window for Windows. It shows the current song's title, artist, album cover and elapsed time, and lets you control playback with previous, play/pause and next buttons.
+Windows için küçük, her zaman üstte kalan bir müzik oynatıcı penceresi. Çalan şarkının adını, sanatçısını, albüm kapağını ve kaçıncı saniyede olduğunu gösterir; önceki, oynat/durdur ve sonraki butonlarıyla kontrol sağlar.
 
-No Spotify API, Premium account or Client ID is required. The app connects to Windows' system media session, the same system the keyboard media keys use.
+Spotify API'si, Premium hesap veya Client ID gerekmez. Uygulama, Windows'un sistem medya oturumuna (klavyedeki medya tuşlarının kullandığı sistem) bağlanır.
 
-## Features
+## Özellikler
 
-- HUD-style rounded horizontal window: album cover on the left, title and artist next to it, a progress bar with elapsed / remaining time below
-- Click and hold on the progress bar and drag to any minute and second to seek
-- Synced lyrics under the progress bar: they scroll line by line, the current line is highlighted and animated (powered by [LRCLIB](https://lrclib.net))
-- Auto accent color from the album cover: the progress bar, equalizer and ripple effect smoothly change to the cover's color for every song
-- Volume: a slider appears at the top when you hover; drag it or use the mouse wheel
-- Compact mode: double-click an empty spot to shrink the player to a small strip with just the cover, the title and a thin progress line
-- Animations: slide-in on launch, cover and text slide in when the song changes, animated equalizer bars while playing, smoothly moving progress bar
-- Previous, play/pause and next buttons fade in on hover and follow your mouse; clicks trigger a ripple effect, and the content slides left/right when you skip tracks
-- Settings via the gear icon in the top right: preset themes, full color customization with HEX / RGB / a color picker, window size (60%-200%), opacity, font picker, lyrics and compact mode toggles
-- Ctrl + mouse wheel resizes the window quickly
-- Theme, size, opacity, font, modes, window position and "always on top" are remembered (`%APPDATA%\SpotifyMiniPlayer\config.json`)
-- Works with free Spotify accounts
+- HUD tarzı, yuvarlak köşeli yatay pencere: solda albüm kapağı, yanında şarkı adı ve sanatçı, altta ilerleme çubuğu ile geçen / kalan süre
+- İlerleme çubuğuna tıklayıp basılı tutarak istediğin dakika ve saniyeye sürükleyebilirsin (sarma)
+- İlerleme çubuğunun altında senkronize şarkı sözleri: satır satır ilerler, çalan satır vurgulanır, kayarak animasyonlu geçer ([LRCLIB](https://lrclib.net) kaynaklı)
+- Kapaktan otomatik vurgu rengi: ilerleme çubuğu, ekolayzır ve dalga efekti her şarkıda albüm kapağının rengine yumuşakça geçer
+- Ses seviyesi: fareyi üstüne getirince üstte ses çubuğu belirir; sürükleyebilir ya da fare tekerleğini çevirebilirsin
+- Kompakt mod: boş bir yere çift tıklayınca sadece kapak, şarkı adı ve ince bir ilerleme çizgisi kalan küçük bir şeride dönüşür
+- Animasyonlar: açılışta kayarak belirme, şarkı değişince kapak ve yazıların kayarak gelmesi, çalarken hareket eden ekolayzır çubukları, yumuşak ilerleyen çubuk
+- Fareyi üstüne getirince önceki, oynat/durdur ve sonraki butonları belirir ve fareyi takip eder; tıklayınca dalga efekti çıkar, ileri/geri basınca içerik ilgili yöne kayar
+- Sağ üstteki çark simgesiyle ayarlar: hazır temalar, HEX / RGB / renk seçici ile tüm renkleri değiştirme, pencere boyutu (%60-%200), şeffaflık, yazı tipi seçimi, sözleri ve kompakt modu açma/kapatma
+- Ctrl + fare tekerleği ile pencereyi hızlıca büyütüp küçültebilirsin
+- Tema, boyut, şeffaflık, yazı tipi, mod, pencere konumu ve "her zaman üstte" seçimi kapatıp açınca hatırlanır (`%APPDATA%\SpotifyMiniPlayer\config.json`)
+- Uygulama arayüzü İngilizcedir
+- Ücretsiz Spotify hesabıyla da çalışır
 
-## Usage
+## Kullanım
 
-1. Download `SpotifyMiniPlayer.exe` from the [Releases](../../releases) page.
-2. Double-click it to run. Start playing a song in Spotify and it appears in the window.
+1. [Releases](../../releases) sayfasından `SpotifyMiniPlayer.exe` dosyasını indir.
+2. Çift tıklayarak aç. Spotify'ı açıp bir şarkı çaldırdığında pencerede görünür.
 
-> Windows SmartScreen may show a warning because the exe is unsigned. Click "More info" → "Run anyway".
+> Windows SmartScreen imzasız bir exe olduğu için uyarı gösterebilir. "Daha fazla bilgi" → "Yine de çalıştır" ile açılır.
 
-## Running from source
+## Kaynak koddan çalıştırma
 
-Python 3.12 is recommended.
+Python 3.12 önerilir.
 
 ```
 pip install -r requirements.txt
 python mini_player.py
 ```
 
-## Building your own exe
+## Kendi exe'ni oluşturma
 
 ```
 pip install pyinstaller
 pyinstaller --onefile --noconsole --collect-submodules winsdk --name SpotifyMiniPlayer mini_player.py
 ```
 
-The output is created at `dist/SpotifyMiniPlayer.exe`. When a tag in the form `v*` (e.g. `v1.0.0`) is pushed to this repository, GitHub Actions builds the exe automatically and attaches it to the Release.
+Çıktı `dist/SpotifyMiniPlayer.exe` içinde oluşur. Bu depoda `v*` biçiminde bir etiket (ör. `v1.0.0`) gönderildiğinde GitHub Actions exe'yi otomatik oluşturup Release'e ekler.
 
-## Limitations
+## Sınırlamalar
 
-- The volume slider controls Spotify's own volume (or the system volume if Spotify isn't playing) and uses the `pycaw` package. If it isn't installed or there is no audio device, the slider is hidden and the rest of the app keeps working.
-- Lyrics come from LRCLIB, an open lyrics service, not from Spotify. Not every song has synced lyrics, and the timing may differ from Spotify's own lyrics. An internet connection is needed to fetch them.
-- Seeking depends on Spotify supporting position changes through Windows media controls. If it doesn't, the bar snaps back.
-- Works only on Windows 10/11.
-- The app does not control Spotify remotely. To pick a song or open a playlist, use Spotify's own window.
-- It prefers the Spotify session if there is one. If Spotify is not running, it may show whatever media session Windows currently considers active (for example, music playing in a browser).
+- Ses çubuğu, Spotify'ın kendi ses seviyesini (Spotify çalmıyorsa sistem sesini) ayarlar ve `pycaw` paketini kullanır. Paket kurulu değilse ya da ses aygıtı bulunamazsa ses çubuğu görünmez, uygulamanın geri kalanı çalışmaya devam eder.
+- Şarkı sözleri Spotify'dan değil, açık bir servis olan LRCLIB'den gelir. Her şarkının senkronize sözü bulunmayabilir ve zamanlama Spotify'ın kendi sözlerinden farklı olabilir. Sözleri getirmek için internet gerekir.
+- Sarma özelliği, Spotify'ın Windows medya kontrolünde konum değiştirmeyi desteklemesine bağlıdır. Desteklemezse çubuk eski yerine döner.
+- Sadece Windows 10/11 üzerinde çalışır.
+- Uygulama, Spotify'ı uzaktan yönetmez; şarkı seçmek veya çalma listesi açmak için Spotify'ın kendi penceresini kullanman gerekir.
+- Varsa Spotify oturumunu gösterir; Spotify açık değilse Windows'un o an aktif saydığı medya oturumunu (ör. tarayıcıda çalan müzik) gösterebilir.
 
-## License
+## Lisans
 
 MIT

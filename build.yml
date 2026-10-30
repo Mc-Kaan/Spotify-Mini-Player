@@ -27,6 +27,8 @@ jobs:
       - name: exe oluştur
         run: >
           pyinstaller --onefile --noconsole
+          --icon assets/icon.ico
+          --add-data "assets/icon.ico;assets"
           --collect-submodules winsdk
           --collect-submodules pycaw
           --collect-submodules comtypes

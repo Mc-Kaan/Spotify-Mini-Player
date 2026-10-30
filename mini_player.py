@@ -28,6 +28,7 @@ import json
 import math
 import os
 import re
+import sys
 import threading
 import time
 import tkinter as tk
@@ -248,6 +249,12 @@ def dominant_color(data, bg):
     v = clamp(v, 0.75, 1.0) if luminance(bg) < 0.5 else clamp(v, 0.35, 0.65)
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+def resource_path(rel):
+    """Path of a bundled file (works from source and from the PyInstaller exe)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
 
 
 def load_config():
@@ -621,6 +628,10 @@ class SettingsWindow:
         self.updating = False
         self.win = win = tk.Toplevel(player.root)
         win.title("Mini Player Settings")
+        try:
+            win.iconbitmap(resource_path(os.path.join("assets", "icon.ico")))
+        except Exception:
+            pass  # no icon file (or not Windows): keep the default icon
         win.configure(bg=self.BG)
         win.resizable(False, False)
         win.attributes("-topmost", True)
