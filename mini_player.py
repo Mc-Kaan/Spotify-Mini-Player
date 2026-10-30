@@ -628,10 +628,12 @@ class SettingsWindow:
         self.updating = False
         self.win = win = tk.Toplevel(player.root)
         win.title("Mini Player Settings")
-        try:
-            win.iconbitmap(resource_path(os.path.join("assets", "icon.ico")))
-        except Exception:
-            pass  # no icon file (or not Windows): keep the default icon
+        for icon_file in ("icon.ico", os.path.join("assets", "icon.ico")):
+            try:
+                win.iconbitmap(resource_path(icon_file))
+                break
+            except Exception:
+                continue  # no icon file (or not Windows): keep the default icon
         win.configure(bg=self.BG)
         win.resizable(False, False)
         win.attributes("-topmost", True)
